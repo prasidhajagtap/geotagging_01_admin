@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Seamex · Attendance Admin</title>
+
+  <!--
+    SEAMEX GEO-ATTENDANCE | admin.html | v01
+    Author : Prasidha Jagtap
+    Role   : Assistant Manager – IT, Aditya Birla Group (Seamex)
+
+    SECURITY NOTE (Prasidha):
+    This admin page uses a client-side password gate only.
+    The Supabase anon key in admin-script.js can read attendance
+    records because SELECT RLS was enabled (see README).
+    For production: move to Azure AD protected route or Supabase
+    Edge Function with proper role-based auth.
+
+    REQUIRED SUPABASE RLS POLICY (run once in Supabase SQL editor):
+    ──────────────────────────────────────────────────────────────
+    CREATE POLICY "Admin can read attendance"
+    ON attendance FOR SELECT TO anon
+    USING (true);
+    ──────────────────────────────────────────────────────────────
+    Without this policy, the admin panel will show no data.
+
+    ELEMENT INDEX (Prasidha)
+    ──────────────────────────────────────────────────────────────
+    #login-screen     Password gate overlay
+    #admin-shell      Main app shell (hidden until authenticated)
+      .top-nav        Navigation bar
+      .tab-bar        Daily / Weekly / Monthly tabs + date navigator
+      .main-content   Scrollable content area
+        #kpi-row      Four KPI metric cards
+        #chart-grid   Bar + Line + Pie + Heatmap charts
+        #filter-row   Search + date + employee filters + threshold
+        #export-bar   CSV and Excel export buttons
+        #summary-sec  One-row-per-employee summary table
+        #detail-sec   Full records drilldown table
+    #admin-toast      Top-right toast notifications
+  -->
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <!-- Chart.js — bar, line, pie, doughnut charts -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+
+  <!-- SheetJS — Excel export -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <!-- Supabase JS v2 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+
+  <!-- Admin stylesheet -->
+  <link rel="stylesheet" href="admin-style.css">
+</head>
+<body>
+
+<!-- ================================================================
+     LOGIN SCREEN — #login-screen (Prasidha)
+     Password gate. Hides until correct password entered.
+     Session stored in sessionStorage — survives refresh, not new tab.
+================================================================ -->
+<div id="login-screen">
+  <div class="login-card">
+    <img src="NEW Seamex logo_testing march 11.png" alt="Seamex Logo" class="login-logo">
+    <p class="login-title">Admin Console</p>
+    <p class="login-sub">Geo Attendance · Restricted Access</p>
+
+    <div class="login-input-wrap">
+      <input type="password" id="login-pwd" class="login-input"
+        placeholder="Enter admin password"
+        autocomplete="off" autocorrect="off" spellcheck="false">
+      <button class="login-eye" id="eye-btn" type="button" title="Show/hide password">👁</button>
+    </div>
+
+    <button class="login-btn" id="login-btn">Access Console</button>
+    <p class="login-err" id="login-err"></p>
+
+    <p class="login-disclaimer">
+      Access is restricted to authorised administrators only.<br>
+      All activity on this console is logged.
+    </p>
+  </div>
+</div>
+
+<!-- ================================================================
+     ADMIN SHELL — #admin-shell (Prasidha)
+     Hidden until login. Flex column: nav + tab bar + content.
+================================================================ -->
+<div id="admin-shell">
+
+  <!-- TOP NAV BAR -->
+  <nav class="top-nav">
+    <img src="NEW Seamex logo_testing march 11.png" alt="Seamex" class="nav-logo">
+    <div class="nav-divider"></div>
+    <div class="nav-title-block">
+      <div class="nav-title">Admin Console</div>
+      <div class="nav-sub">Geo Attendance · Aditya Birla Group (Seamex)</div>
+    </div>
+    <div class="nav-right">
+      <span class="nav-refresh" id="nav-refresh">—</span>
+      <div class="live-dot"><span>Live</span></div>
+      <button class="nav-theme-btn" id="nav-theme-btn" onclick="toggleAdminTheme()">🌙 Dark</button>
+      <button class="nav-logout" id="nav-logout" onclick="adminLogout()">Logout</button>
+    </div>
+  </nav>
+
+  <!-- TAB BAR -->
+  <div class="tab-bar">
+    <!--
+      Three time-period tabs.
+      active class applied by switchTab() in admin-script.js.
+    -->
+    <button class="tab-btn active" data-tab="daily"   onclick="switchTab('daily')">Today</button>
+    <button class="tab-btn"        data-tab="weekly"  onclick="switchTab('weekly')">This Week</button>
+    <button class="tab-btn"        data-tab="monthly" onclick="switchTab('monthly')">This Month</button>
+
+    <div class="tab-spacer"></div>
+
+    <!-- Date navigator: previous / label / next -->
+    <div class="date-nav">
+      <button class="date-nav-btn" id="date-prev" onclick="navDate(-1)" title="Previous">‹</button>
+      <span class="date-label" id="date-label">Today</span>
+      <button class="date-nav-btn" id="date-next" onclick="navDate(1)"  title="Next">›</button>
+    </div>
+  </div>
+
+  <!-- MAIN CONTENT AREA -->
+  <div class="main-content">
+
+    <!-- KPI CARDS -->
+    <div class="kpi-row" id="kpi-row">
+      <!--
+        Four KPI cards. Values populated by renderKPIs() in admin-script.js.
+        kpi-attendance-rate, kpi-total-hours, kpi-late, kpi-missing
+      -->
+      <div class="kpi-card kpi-green">
+        <div class="kpi-label">Attendance Rate</div>
+        <div class="kpi-value" id="kpi-rate">—</div>
+        <div class="kpi-sub" id="kpi-rate-sub">present / total employees</div>
+      </div>
+
+      <div class="kpi-card kpi-orange">
+        <div class="kpi-label">Total Shift Hours</div>
+        <div class="kpi-value" id="kpi-hours">—</div>
+        <div class="kpi-sub" id="kpi-hours-sub">across all employees</div>
+      </div>
+
+      <div class="kpi-card kpi-amber">
+        <div class="kpi-label">Late Clock-Ins</div>
+        <div class="kpi-value" id="kpi-late">—</div>
+        <div class="kpi-sub">after <span id="kpi-late-thresh">09:30</span> AM threshold</div>
+      </div>
+
+      <div class="kpi-card kpi-red">
+        <div class="kpi-label">Missing Clock-Outs</div>
+        <div class="kpi-value" id="kpi-missing">—</div>
+        <div class="kpi-sub">clocked in, no clock-out recorded</div>
+      </div>
+    </div>
+
+    <!-- CHART GRID -->
+    <div class="chart-grid" id="chart-grid">
+
+      <!-- Bar chart: hours worked per day -->
+      <div class="chart-card chart-wide">
+        <div class="chart-hdr">
+          <div>
+            <div class="chart-title">Hours Worked Per Day</div>
+            <div class="chart-sub">Total shift hours across all employees</div>
+          </div>
+        </div>
+        <div class="canvas-wrap" style="height:200px">
+          <canvas id="chart-bar"></canvas>
+        </div>
+      </div>
+
+      <!-- Line chart: daily attendance count -->
+      <div class="chart-card">
+        <div class="chart-hdr">
+          <div>
+            <div class="chart-title">Attendance Trend</div>
+            <div class="chart-sub">Employees present per day</div>
+          </div>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="chart-line"></canvas>
+        </div>
+      </div>
+
+      <!-- Pie/Donut: present vs absent -->
+      <div class="chart-card">
+        <div class="chart-hdr">
+          <div>
+            <div class="chart-title">Present vs Absent</div>
+            <div class="chart-sub">For the selected period</div>
+          </div>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="chart-pie"></canvas>
+        </div>
+      </div>
+
+      <!-- Heatmap: attendance by day of week -->
+      <div class="chart-card chart-wide">
+        <div class="chart-hdr">
+          <div>
+            <div class="chart-title">Attendance Heatmap</div>
+            <div class="chart-sub">Clock-ins by day of week over time</div>
+          </div>
+        </div>
+        <div id="heatmap-container"></div>
+      </div>
+
+    </div><!-- /chart-grid -->
+
+    <!-- FILTER ROW -->
+    <div class="filter-row" id="filter-row">
+
+      <div class="filter-group">
+        <label class="filter-label">Search Employee</label>
+        <input type="text" id="f-search" class="filter-input"
+          placeholder="Name or Poornata ID"
+          oninput="applyFilters()">
+      </div>
+
+      <div class="filter-group">
+        <label class="filter-label">From Date</label>
+        <input type="date" id="f-from" class="filter-input" onchange="applyFilters()">
+      </div>
+
+      <div class="filter-group">
+        <label class="filter-label">To Date</label>
+        <input type="date" id="f-to" class="filter-input" onchange="applyFilters()">
+      </div>
+
+      <div class="filter-group">
+        <label class="filter-label">Status</label>
+        <select id="f-status" class="filter-input" onchange="applyFilters()">
+          <option value="">All</option>
+          <option value="completed">Completed</option>
+          <option value="missing_out">Missing Clock-Out</option>
+          <option value="late">Late</option>
+        </select>
+      </div>
+
+      <div class="filter-group">
+        <label class="filter-label">Late After (HH:MM)</label>
+        <div class="threshold-wrap">
+          <input type="time" id="f-threshold" class="filter-input"
+            value="09:30" style="min-width:110px" onchange="applyFilters()">
+        </div>
+      </div>
+
+      <div class="filter-spacer"></div>
+      <button class="btn-reset" onclick="resetFilters()">Reset Filters</button>
+    </div>
+
+    <!-- EXPORT BAR -->
+    <div class="export-bar" id="export-bar">
+      <div class="export-bar-left">
+        Showing <strong id="rec-count">0</strong> records
+        <span id="filter-indicator"></span>
+      </div>
+      <div class="export-btns">
+        <button class="btn-export btn-csv"  onclick="exportCSV(false)"  title="Export current filtered view">⬇ CSV (Filtered)</button>
+        <button class="btn-export btn-xlsx" onclick="exportXLSX(false)" title="Export current filtered view to Excel">⬇ Excel (Filtered)</button>
+        <button class="btn-export btn-csv-all" onclick="exportCSV(true)"  title="Export all records">⬇ CSV (All)</button>
+        <button class="btn-export btn-csv-all" onclick="exportXLSX(true)" title="Export all records to Excel" style="background:rgba(22,163,74,.05);color:var(--green);border-color:rgba(22,163,74,.15)">⬇ Excel (All)</button>
+      </div>
+    </div>
+
+    <!-- SUMMARY TABLE: one row per employee per day -->
+    <div class="summary-card" id="summary-sec">
+      <div class="summary-card-hdr">Summary — One Row Per Employee</div>
+      <div class="table-scroll">
+        <table id="summary-table">
+          <thead>
+            <tr>
+              <th onclick="sortSummary('name')">Employee</th>
+              <th onclick="sortSummary('employee_id')">Poornata ID</th>
+              <th onclick="sortSummary('date')">Date</th>
+              <th onclick="sortSummary('clock_in')">Clock In</th>
+              <th onclick="sortSummary('clock_out')">Clock Out</th>
+              <th onclick="sortSummary('duration')">Duration</th>
+              <th onclick="sortSummary('location_in')">In Location</th>
+              <th onclick="sortSummary('location_out')">Out Location</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="summary-tbody">
+            <tr><td colspan="9" class="right"><div class="spinner-wrap"><div class="spinner"></div></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- DETAIL TABLE: full raw records -->
+    <div class="table-card" id="detail-sec">
+      <div class="table-card-hdr">
+        <span>All Records (Raw)</span>
+        <span id="detail-count" style="font-size:.7rem;color:var(--txm);font-weight:400"></span>
+      </div>
+      <div class="table-scroll">
+        <table id="detail-table">
+          <thead>
+            <tr>
+              <th onclick="sortDetail('user_name')">Name</th>
+              <th onclick="sortDetail('employee_id')">ID</th>
+              <th onclick="sortDetail('clock_in_time')">Clock In</th>
+              <th onclick="sortDetail('clock_in_location_name')">In Location</th>
+              <th onclick="sortDetail('clock_out_time')">Clock Out</th>
+              <th onclick="sortDetail('clock_out_location_name')">Out Location</th>
+              <th>Duration</th>
+              <th>Status</th>
+              <th onclick="sortDetail('created_at')">Submitted At</th>
+            </tr>
+          </thead>
+          <tbody id="detail-tbody">
+            <tr><td colspan="9"><div class="spinner-wrap"><div class="spinner"></div></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- /main-content -->
+</div><!-- /admin-shell -->
+
+<!-- TOP-RIGHT TOAST CONTAINER -->
+<div id="admin-toast"></div>
+
+<!-- Admin script — loaded last so DOM is fully available -->
+<script src="admin-script.js"></script>
+
+</body>
+</html>
